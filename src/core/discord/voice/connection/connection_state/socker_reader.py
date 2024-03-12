@@ -6,10 +6,8 @@ import select
 
 from src.core.discord.voice.connection.base import BaseCustomVoiceConnectionState
 
-# Type aliases
 SocketReaderCallback = Callable[[bytes], Any]
-
-_logger = logging.getLogger(__name__)
+_logger = logging.getLogger(f"custom_voice.{__name__}")
 
 
 class SocketReader(threading.Thread):
@@ -87,7 +85,7 @@ class SocketReader(threading.Thread):
 
             # Since this socket is a non-blocking socket, select has to be used to wait on it for reading.
             try:
-                readable, _, _ = select.select([self._state.socket], [], [], 30)
+                readable, _, _ = select.select([self._state.voice_socket], [], [], 30)
             except (ValueError, TypeError):
                 # The socket is either closed or doesn't exist at the moment
                 continue
@@ -96,7 +94,7 @@ class SocketReader(threading.Thread):
                 continue
 
             try:
-                data = self._state.socket.recv(2048)  # type: ignore
+                data = self._state.voice_socket.recv(2048)  # type: ignore
             except OSError:
                 _logger.debug(f"Error reading from socket in {self}, this should be safe to ignore")
             else:

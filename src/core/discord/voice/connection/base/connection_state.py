@@ -1,14 +1,13 @@
 import asyncio
 import socket
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Tuple, Optional, List
+from typing import TYPE_CHECKING, Tuple, Optional, List, TypeVar
 
 import discord
 from discord.abc import Snowflake
 from discord.member import VoiceState
 
-from src.core.discord.voice.connection.voice_web_socket import CustomVoiceWebSocket
-from .voice_web_socket import WebsocketHook
+from .voice_web_socket import BaseCustomVoiceWebSocket, WebsocketHook
 
 if TYPE_CHECKING:
     from discord.types.voice import (
@@ -17,43 +16,45 @@ if TYPE_CHECKING:
         VoiceServerUpdate as VoiceServerUpdatePayload
     )
 
-    from .voice_client import BaseCustomVoiceClient, VocalGuildChannel
+    from .voice_client import BaseCustomVoiceClient, VocalGuildChannel  # type: ignore
+
+_voiceClientT = TypeVar("_voiceClientT", bound='BaseCustomVoiceClient')
 
 
 class BaseCustomVoiceConnectionState:
     def __init__(
             self,
-            voice_client: 'BaseCustomVoiceClient',
-            default_timeout: float = 15.0,
+            voice_client: _voiceClientT,
             *,
-            hook: Optional[WebsocketHook] = None) -> None:
-        self._voice_client = voice_client
-        self._hook = hook
+            timeout: float = 15.0,
+            websocket_hook: Optional[WebsocketHook] = None) -> None:
+        self._voice_client: _voiceClientT = voice_client
+        self._websocket_hook = websocket_hook
 
         # Parameters
-        self.timeout: float = default_timeout
+        self.timeout: float = timeout
         self.reconnect = True
 
-        # Connection info (Used for getting UDP server data in websocket)
+        # Websocket
+        self.websocket_endpoint: Optional[str] = None  # Used for connecting websocket
+
+        # Connection info (Fetched during voice state/server update. Used for connecting websocket)
         self.token: Optional[str] = None
         self.server_id: Optional[int] = None
+        self.session_id: Optional[str] = None
 
-        # Session (Used for WebSocket and UDP socket)
-        self.session_id: Optional[str] = None  # Session id. Fetched in websocket handshake
-        self.secret_key: Optional[List[int]] = None  # Session secret key. Fetched in websocket handshake
+        # Session info (Fetched during websocket handshake. Used for sending voice data)
+        self.secret_key: Optional[List[int]] = None
+        self.ssrc: Optional[int] = None
 
-        # Websocket data
-        self.ssrc: Optional[int] = None  # Used in websocket
-        self.endpoint: Optional[str] = None  # Websocket endpoint. Used for connecting websocket
-
-        # UDP socket data
-        self.ip: Optional[str] = None  # UDP socket ip
-        self.port: Optional[int] = None  # UDP socket port
-        self.mode: Optional[SupportedModes] = None  # Encoding mode for UDP socket
+        # Voice server info (Fetched during websocket handshake. Used for sending voice data)
+        self.voice_server_ip: Optional[str] = None
+        self.voice_server_port: Optional[int] = None
+        self.voice_encryption_mode: Optional[SupportedModes] = None
 
         # Sockets
-        self.socket: Optional[socket.socket] = None  # Used for getting voice data (audio)
-        self.ws: Optional[CustomVoiceWebSocket] = None  # User for creating UDP connection and getting events
+        self.voice_socket: Optional[socket.socket] = None  # Used for getting/sending voice data (audio)
+        self.ws: Optional[BaseCustomVoiceWebSocket] = None  # Used for creating UDP connection and getting events
 
     @property
     def guild(self) -> discord.Guild:
@@ -87,6 +88,9 @@ class BaseCustomVoiceConnectionState:
     def is_connected(self) -> bool: ...
 
     @abstractmethod
+    def is_reconnecting(self) -> bool: ...
+
+    @abstractmethod
     async def on_voice_state_update(self, data: 'GuildVoiceStatePayload') -> None: ...
 
     @abstractmethod
@@ -108,4 +112,11 @@ class BaseCustomVoiceConnectionState:
     def wait_until_connected(self, timeout: Optional[float] = 30.0) -> bool: ...
 
     @abstractmethod
-    def send_packet(self, packet: bytes) -> None: ...
+    def send_audio_packet(self, data: bytes, *, encode: bool = True) -> None: ...
+
+    def set_voice_server_protocol(self, ip: str, port: int) -> None:
+        self.voice_server_ip = ip
+        self.voice_server_port = port
+
+    def set_voice_socket_encryption_mode(self, mode: 'SupportedModes') -> None:
+        self.voice_encryption_mode = mode

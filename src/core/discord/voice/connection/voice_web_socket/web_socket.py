@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Union, Any
+from typing import Dict, Union, Any, List
 
 from discord import SpeakingState
 from discord.gateway import VoiceKeepAliveHandler
@@ -7,19 +7,10 @@ from discord.types.voice import SupportedModes
 
 from src.core.discord.voice.connection.base.voice_web_socket import BaseCustomVoiceWebSocket
 
-_logger = logging.getLogger(f"voice_web_socket.{__name__}")
+_logger = logging.getLogger(f"custom_voice.{__name__}")
 
 
 class CustomVoiceWebSocket(BaseCustomVoiceWebSocket):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-
-        self._ssrc_map: Dict[str, Dict[str, Any]] = {}
-
-    @property
-    def ssrc_map(self) -> Dict[str, Dict[str, Any]]:
-        return self._ssrc_map
-
     async def send_resume(self) -> None:
         await self.send_as_json({
             "op": self.RESUME,
@@ -66,19 +57,26 @@ class CustomVoiceWebSocket(BaseCustomVoiceWebSocket):
     async def _load_secret_key(self, data: Dict[str, Any]) -> None:
         _logger.info("Received secret key for voice connection")
 
-        self._secret_key = self.state.secret_key = data.get("secret_key", None)
+        self._state.secret_key = data.get("secret_key", None)
+        self._is_ready = True
+
         await self.send_speak(False)
 
+    def _select_mode(self, modes: List[str]) -> 'SupportedModes':
+        available_modes = [mode for mode in modes if mode in self.state.supported_modes]
+        return available_modes[0]  # type: ignore
+
     async def _init_connection(self, data: Dict[str, Any]) -> None:
-        self.state.ssrc = data["ssrc"]
-        self.state.port = data["port"]
-        self.state.ip = data["ip"]
+        self._state.ssrc = data["ssrc"]
 
-        modes = [mode for mode in data["modes"] if mode in self.state.supported_modes]
-        mode = modes[0]
+        ip = data["ip"]
+        port = data["port"]
+        mode = self._select_mode(data["modes"])
 
-        await self.send_select_protocol(self.state.ip, self.state.port, mode)
-        _logger.info(f"Selected the voice protocol for use ({mode})")
+        self.state.set_voice_server_protocol(ip, port)
+        await self.send_select_protocol(ip, port, mode)
+
+        _logger.info(f"Selected the voice protocol ({mode})")
 
     async def process_received_message(self, data: Dict[str, Any]) -> None:
         _logger.debug(f"Voice websocket frame received: {data}")
@@ -90,22 +88,22 @@ class CustomVoiceWebSocket(BaseCustomVoiceWebSocket):
             await self._init_connection(message_data)
 
         elif opcode == self.HEARTBEAT_ACK:
-            self._keep_alive.ack()  # type: ignore
+            self._keep_alive_handler.ack()  # type: ignore
 
         elif opcode == self.RESUMED:
             _logger.info("Voice RESUME succeeded.")
 
         elif opcode == self.SESSION_DESCRIPTION:
             message_data = data["d"]
-            self._state.mode = message_data["mode"]
+            self._state.voice_encryption_mode = message_data["mode"]
             await self._load_secret_key(message_data)
 
         elif opcode == self.HELLO:
             message_data = data["d"]
             interval = message_data["heartbeat_interval"] / 1000.0
             # This class implements the same interface, so we can use VoiceKeepAliveHandler
-            self._keep_alive = VoiceKeepAliveHandler(ws=self, interval=min(interval, 5.0))  # type: ignore
-            self._keep_alive.start()
+            self._keep_alive_handler = VoiceKeepAliveHandler(ws=self, interval=min(interval, 5.0))  # type: ignore
+            self._keep_alive_handler.start()
 
         elif opcode == self.SPEAKING:
             message_data = data["d"]

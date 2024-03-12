@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from abc import ABC, abstractmethod
-from typing import TypeAlias, Callable, Dict, Any, Coroutine, TypeVar, TYPE_CHECKING, Optional, List, Generic, Union
+from typing import TypeAlias, Callable, Dict, Any, Coroutine, TypeVar, TYPE_CHECKING, Optional, Generic, Union
 
 import aiohttp
 from aiohttp import ClientWebSocketResponse
@@ -13,11 +13,11 @@ if TYPE_CHECKING:
     from .connection_state import BaseCustomVoiceConnectionState  # type: ignore
     from discord.types.voice import SupportedModes
 
-_connectionStateT = TypeVar('_connectionStateT', bound='BaseCustomVoiceConnectionState')
-_logger = logging.getLogger(f"voice_web_socket.{__name__}")
+_voiceConnectionStateT = TypeVar('_voiceConnectionStateT', bound='BaseCustomVoiceConnectionState')
+_logger = logging.getLogger(f"custom_voice.{__name__}")
 
 
-class BaseCustomVoiceWebSocket(ABC, Generic[_connectionStateT]):
+class BaseCustomVoiceWebSocket(ABC, Generic[_voiceConnectionStateT]):
     """
     Implements the WebSocket protocol for handling voice connections.
 
@@ -61,25 +61,25 @@ class BaseCustomVoiceWebSocket(ABC, Generic[_connectionStateT]):
     def __init__(
             self,
             *,
-            state: _connectionStateT,
+            state: _voiceConnectionStateT,
             web_socket: ClientWebSocketResponse,
             loop: asyncio.AbstractEventLoop,
             hook: Optional['WebsocketHook'] = None) -> None:
-        self._state: _connectionStateT = state
-        self._connection = self._state  # Alias
-
-        self._web_socket: ClientWebSocketResponse = web_socket
-        self.ws = self._web_socket  # Alias
-
+        self._state: _voiceConnectionStateT = state
         self._loop: asyncio.AbstractEventLoop = loop
         self._hook: Optional['WebsocketHook'] = hook
+        self._web_socket: ClientWebSocketResponse = web_socket
 
-        self._keep_alive: Optional[VoiceKeepAliveHandler] = None
-        self._secret_key: Optional[List[int]] = None
+        # State
         self._close_code: Optional[int] = None
+        self._is_ready: bool = False
+
+        # Session
+        self._keep_alive_handler: Optional[VoiceKeepAliveHandler] = None
+        self._ssrc_map: Dict[str, Dict[str, Any]] = {}
 
     @property
-    def state(self) -> _connectionStateT:
+    def state(self) -> _voiceConnectionStateT:
         return self._state
 
     @property
@@ -91,12 +91,12 @@ class BaseCustomVoiceWebSocket(ABC, Generic[_connectionStateT]):
         return self._close_code
 
     @property
-    def is_ready(self) -> bool:
-        return self._secret_key is not None
-
-    @property
     def is_closed(self) -> bool:
         return self._close_code is not None
+
+    @property
+    def is_ready(self) -> bool:
+        return self._is_ready
 
     @property
     def latency(self) -> float:
@@ -104,7 +104,7 @@ class BaseCustomVoiceWebSocket(ABC, Generic[_connectionStateT]):
         Latency between a HEARTBEAT and its HEARTBEAT_ACK in seconds.
         """
 
-        heartbeat = self._keep_alive
+        heartbeat = self._keep_alive_handler
         return float("inf") if heartbeat is None else heartbeat.latency
 
     @property
@@ -113,16 +113,11 @@ class BaseCustomVoiceWebSocket(ABC, Generic[_connectionStateT]):
         Average of last 20 HEARTBEAT latencies.
         """
 
-        heartbeat = self._keep_alive
+        heartbeat = self._keep_alive_handler
         if heartbeat is None or not heartbeat.recent_ack_latencies:
             return float("inf")
 
         return sum(heartbeat.recent_ack_latencies) / len(heartbeat.recent_ack_latencies)
-
-    @property
-    @abstractmethod
-    def ssrc_map(self) -> Dict[str, Dict[str, Any]]:
-        ...
 
     @abstractmethod
     async def send_resume(self) -> None:
@@ -148,6 +143,9 @@ class BaseCustomVoiceWebSocket(ABC, Generic[_connectionStateT]):
         _logger.debug("Sending voice websocket frame: %s.", data)
         await self._web_socket.send_str(_to_json(data))
 
+    async def send_heartbeat(self, data: Dict[str, Any]) -> None:
+        await self.send_as_json(data)
+
     async def poll_event(self) -> None:
         received_message = await asyncio.wait_for(self._web_socket.receive(), timeout=30.0)
 
@@ -163,36 +161,11 @@ class BaseCustomVoiceWebSocket(ABC, Generic[_connectionStateT]):
             raise ConnectionClosed(self._web_socket, shard_id=None, code=self._close_code)
 
     async def close(self, code: int = 1000) -> None:
-        if self._keep_alive is not None:
-            self._keep_alive.stop()
+        if self._keep_alive_handler is not None:
+            self._keep_alive_handler.stop()
 
         self._close_code = code
         await self._web_socket.close(code=code)
-
-    # Aliases
-
-    async def send_resume_session(self) -> None:
-        await self.send_resume()
-
-    # Aliases to implement the same interface
-
-    async def resume(self) -> None:
-        await self.send_resume()
-
-    async def identify(self) -> None:
-        await self.send_identify()
-
-    async def speak(self, state: Union[SpeakingState, bool] = SpeakingState.voice) -> None:
-        await self.send_speak(state)
-    
-    async def select_protocol(self, ip: str, port: int, mode: 'SupportedModes') -> None:
-        await self.send_select_protocol(ip, port, mode)
-
-    async def received_message(self, data: dict) -> None:
-        await self.process_received_message(data)
-    
-    async def send_heartbeat(self, data: Dict[str, Any]) -> None:
-        await self.send_as_json(data)
 
 
 # Types

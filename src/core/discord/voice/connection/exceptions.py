@@ -1,4 +1,8 @@
-from .base import VoiceConnectionError
+from src.core.exceptions import BaseBotError
+
+
+class VoiceConnectionError(BaseBotError):
+    pass
 
 
 class DisconnectedFromVoiceError(VoiceConnectionError):
